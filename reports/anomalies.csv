@@ -1,0 +1,2 @@
+Date,Description,Amount,Merchant,Category,Type,AbsAmount,Month,Anomaly
+2025-08-05,Rent to Landlord,-15000,rent landlord,Rent,Debit,15000,2025-08-01,True
