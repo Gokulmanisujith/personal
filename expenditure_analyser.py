@@ -15,19 +15,19 @@ import json
 # You can extend/modify these patterns.
 CATEGORY_RULES: List[Tuple[str, str]] = [
     # pattern (case-insensitive), category
-    (r"\b(uber|ola|rapido|in-drive|indrive)\b", "Transport"),
-    (r"\b(swiggy|zomato|domino'?s|kfc|mcdonald|pizza hut|eatfit|chai point)\b", "Food & Dining"),
-    (r"\b(amazon|flipkart|myntra|ajio|tata cliq|meesho)\b", "Shopping"),
+    (r"\b(uber|ola|rapido|in-drive|indrive|Auto)\b", "Transport"),
+    (r"\b(swiggy|zomato|domino'?s|kfc|mcdonald|pizza hut|eatfit|chai point|Movie)\b", "Food & Dining"),
+    (r"\b(amazon|flipkart|myntra|ajio|tata cliq|meesho|Grocery)\b", "Shopping"),
     (r"\b(bharat pe|phonepe|google pay|gpay|paytm)\b", "Payments"),
     (r"\b(airtel|jio|vi|vodafone|bsnl)\b.*\b(recharge|prepaid|postpaid|bill)\b", "Mobile & Internet"),
     (r"\b(electricity|power|b(es)?com|tneb|tsspdcl|mseb)\b", "Utilities"),
     (r"\b(rent|landlord|lease)\b", "Rent"),
     (r"\b(uber pass|membership|subscription|netflix|prime|spotify|yt premium|youtube premium)\b", "Subscriptions"),
-    (r"\b(insurance|premium|policy)\b", "Insurance"),
+    (r"\b(insurance|premium|policy|Phone EMI)\b", "Insurance"),
     (r"\b(medical|pharmacy|apollo|1mg|practo|pharmeasy|hospital|clinic)\b", "Health"),
     (r"\b(petrol|fuel|hpcl|bpcl|ioc|iocl|shell)\b", "Fuel"),
     (r"\b(salary|payout|credit|refund|reversal|cashback)\b", "Income"),
-    (r"\b(atm|cash withdrawal)\b", "Cash"),
+    (r"\b(atm|cash withdrawal|Concert)\b", "Cash"),
 ]
 
 # Fallback keywords if regex rules didn't match
@@ -44,22 +44,23 @@ def _standardize_columns(df: pd.DataFrame, date_col: str, desc_col: str, amount_
     })
     return df[["Date", "Description", "Amount"]]
 
-def load_transactions(csv_path: str, date_col: str="Date", desc_col: str="Description", amount_col: str="Amount") -> pd.DataFrame:
-    """Load a CSV of transactions with columns: Date, Description, Amount.
-    Amount: positive = credit (income), negative = debit (expense).
-    """
-    df = pd.read_csv(csv_path)
+def load_transactions(
+    csv_path: pd.DataFrame,
+    date_col: str = "Date",
+    desc_col: str = "Description",
+    amount_col: str = "Amount"
+) -> pd.DataFrame:
+    df = csv_path
     df = _standardize_columns(df, date_col, desc_col, amount_col)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"])
-    # Normalize strings
     df["Description"] = df["Description"].astype(str).str.strip()
     df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
     df = df.dropna(subset=["Amount"])
     return df.sort_values("Date").reset_index(drop=True)
 
 def extract_merchant(description: str) -> str:
-    """Naive merchant extraction by removing numbers and common tokens."""
+  
     s = description.lower()
     s = re.sub(r"\d+", " ", s)
     s = re.sub(r"txn|transaction|upi|imps|neft|ref|id|utr|amt|debited|credited|to|from", " ", s)
@@ -82,64 +83,56 @@ def categorize(description: str, amount: float) -> str:
 
 def enrich_transactions(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df["Merchant"] = df["Description"].apply(extract_merchant)
+
+    # Ensure Date is datetime before using .dt
+    if not np.issubdtype(df["Date"].dtype, np.datetime64):
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce", dayfirst=False)
+
+    # Merchant: use API field if present, else fallback
+    if "Merchant" in df.columns:
+        df["Merchant"] = df["Merchant"]
+    else:
+        df["Merchant"] = df["Description"].apply(extract_merchant)
+
+    # Category from description + amount
     df["Category"] = [categorize(d, a) for d, a in zip(df["Description"], df["Amount"])]
+
+    # Type: Credit/Debit based on amount
     df["Type"] = np.where(df["Amount"] >= 0, "Credit", "Debit")
+
+    # Absolute amount for analysis
     df["AbsAmount"] = df["Amount"].abs()
+
+    # Month for trend analysis (safe since Date is datetime now)
     df["Month"] = df["Date"].dt.to_period("M").dt.to_timestamp()
+
     return df
 
-def summarize_overall(df: pd.DataFrame) -> Dict[str, float]:
-    credits = df.loc[df["Amount"] > 0, "Amount"].sum()
-    debits = df.loc[df["Amount"] < 0, "Amount"].sum()
+def summarize_overall(df: pd.DataFrame) -> dict:
     return {
-        "total_income": float(credits),
-        "total_expense": float(abs(debits)),
-        "net_savings": float(credits + debits),
-        "num_transactions": int(len(df))
+        "Total Income": df.loc[df["Type"] == "Credit", "Amount"].sum(),
+        "Total Expense": df.loc[df["Type"] == "Debit", "AbsAmount"].sum(),
+        "Net Savings": df["Amount"].sum(),
+        "Transactions": len(df)
     }
 
-def summarize_by_category(df: pd.DataFrame) -> pd.DataFrame:
-    g = df[df["Amount"] < 0].groupby("Category", as_index=False)["AbsAmount"].sum()
-    g = g.sort_values("AbsAmount", ascending=False).reset_index(drop=True)
-    return g
+def summarize_by_category(df: pd.DataFrame) -> dict:
+    return df.groupby("Category")["AbsAmount"].sum().sort_values(ascending=False).to_dict()
 
-def summarize_monthly_trends(df: pd.DataFrame) -> pd.DataFrame:
-    monthly = df.groupby(["Month"]).agg(
-        income=("Amount", lambda s: s[s>0].sum()),
-        expense=("Amount", lambda s: abs(s[s<0].sum()))
-    ).reset_index()
-    monthly["net"] = monthly["income"] - monthly["expense"]
-    return monthly.sort_values("Month")
 
-def top_merchants(df: pd.DataFrame, n: int=10) -> pd.DataFrame:
-    temp = df[df["Amount"] < 0]  # expenses only
-    g = temp.groupby("Merchant").agg(
-        transactions=("Merchant", "count"),
-        total_spent=("AbsAmount", "sum"),
-        top_category=("Category", lambda s: s.value_counts().idxmax())
-    ).reset_index()
-    g = g.sort_values(["total_spent", "transactions"], ascending=[False, False]).head(n)
-    return g
+def summarize_monthly_trends(df: pd.DataFrame) -> dict:
+    return df.groupby("Month")["AbsAmount"].sum().reset_index().to_dict(orient="records")
 
-def detect_anomalies(df: pd.DataFrame, method: str="iqr", factor: float=1.5) -> pd.DataFrame:
-    """Flag unusually high expense transactions using IQR (default) or zscore."""
-    expenses = df[df["Amount"] < 0].copy()
-    if expenses.empty:
-        return expenses.assign(Anomaly=False)
-    if method == "zscore":
-        # Robust z-score like using MAD
-        med = expenses["AbsAmount"].median()
-        mad = (np.abs(expenses["AbsAmount"] - med)).median() or 1.0
-        z = 0.6745 * (expenses["AbsAmount"] - med) / mad
-        expenses["Anomaly"] = np.abs(z) > 3.5
-    else:
-        q1 = expenses["AbsAmount"].quantile(0.25)
-        q3 = expenses["AbsAmount"].quantile(0.75)
-        iqr = (q3 - q1) or 1.0
-        upper = q3 + factor * iqr
-        expenses["Anomaly"] = expenses["AbsAmount"] > upper
-    return expenses.loc[expenses["Anomaly"]].sort_values("AbsAmount", ascending=False)
+
+def top_merchants(df: pd.DataFrame, n: int = 5) -> dict:
+    return df.groupby("Merchant")["AbsAmount"].sum().nlargest(n).to_dict()
+
+
+def detect_anomalies(df: pd.DataFrame) -> dict:
+    threshold = df["AbsAmount"].mean() + 2 * df["AbsAmount"].std()
+    anomalies = df[df["AbsAmount"] > threshold]
+    return anomalies[["Date", "Description", "Merchant", "AbsAmount", "Category"]].to_dict(orient="records")
+
 
 # ---------- Plotting (Matplotlib only, no styles/colors specified) ----------
 def plot_category_pie(by_cat: pd.DataFrame, save_path: Path, title: str="Expenses by Category"):
