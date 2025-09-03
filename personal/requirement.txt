@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+plotly
+requests
+fastapi
+uvicorn
+pdfplumber
+pydantic
+google-generativeai
+sentence-transformers
+faiss-cpu
+matplotlib
