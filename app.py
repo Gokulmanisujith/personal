@@ -14,7 +14,7 @@ st.set_page_config(page_title="Personal Expense Analyser", layout="wide")
 st.sidebar.title("ExpenseTracker")
 menu = st.sidebar.radio(
     "Menu",
-    ["Dashboard", "Debts & Loans", "Reminders", "AI Assistant"]
+    ["Dashboard", "Debts & Loans", "Future Payments", "AI Assistant"]
 )
 
 # Function to fetch data from backend
@@ -83,7 +83,7 @@ if menu == "Dashboard":
             st.markdown("### ➕ Add Expense")
             description = st.text_input("Description")
             amount = st.number_input("Amount", min_value=0.0, step=10.0)
-            merchant = st.text_input("Merchant (optional)")
+            merchant = st.text_input("Merchant")
             payment_method = st.selectbox("Payment Method", ["UPI", "ATM", "NEFT", "Other"])
             submitted = st.form_submit_button("Add Expense")
             if submitted:
@@ -104,7 +104,7 @@ if menu == "Dashboard":
             st.markdown("### ➕ Add Income")
             description = st.text_input("Description")
             amount = st.number_input("Amount", min_value=0.0, step=10.0)
-            merchant = st.text_input("Merchant (optional)")
+            merchant = st.text_input("Merchant")
             payment_method = st.selectbox("Payment Method", ["UPI", "ATM", "NEFT", "Other"])
             submitted = st.form_submit_button("Add Income")
             if submitted:
@@ -225,28 +225,28 @@ elif menu == "Debts & Loans":
 
 
 # ------------------- 4. Reminders ------------------- #
-elif menu == "Reminders":
-    st.title("⏰ Reminders")
+elif menu == "Future Payments":
+    st.title("⏰ Future Payments")
 
     # Fetch existing reminders
     reminders = requests.get(f"{BASE_URL}/reminders").json()
     reminders_df = pd.DataFrame(reminders)
 
-    st.subheader("📌 Upcoming Reminders")
+    st.subheader("📌 Upcoming Payments")
     if not reminders_df.empty:
         st.table(reminders_df)
     else:
-        st.info("No upcoming reminders. Add a reminder to get started.")
+        st.info("No upcoming Payments. Add a payment to get started.")
 
-    with st.expander("➕ Add Reminder"):
+    with st.expander("➕ Add Payment"):
         with st.form("reminder_form"):
-            title = st.text_input("Reminder Title")
+            title = st.text_input("Payment Title")
             date = st.date_input("Date")
             amount = st.number_input("Amount (₹)", min_value=0.0, step=100.0)
             time = st.time_input("Time")
             notes = st.text_area("Notes")
 
-            submitted = st.form_submit_button("Add Reminder")
+            submitted = st.form_submit_button("Add Payment")
             if submitted:
                 new_reminder = {
                     "title": title,
@@ -257,26 +257,33 @@ elif menu == "Reminders":
                 }
                 res = requests.post(f"{BASE_URL}/add_reminder", json=new_reminder)
                 if res.status_code == 200:
-                    st.success("✅ Reminder added successfully!")
+                    st.success("✅ Payment added successfully!")
                     st.rerun()
                 else:
-                    st.error("❌ Failed to add reminder")
+                    st.error("❌ Failed to add payment")
 
 
 # ------------------- 5. AI Assistant ------------------- #
+
 elif menu == "AI Assistant":
-    st.title("💬 Personal Finance Chatbot (Bard AI)")
+    st.title("💬 Personal Finance Chatbot")
 
-    # Initialize chat history once
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-        # Add greeting message only the first time
-        st.session_state.chat_history.append(("Bot", "Hey hi! how can I help you"))
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hey hi! How can I help you?"}
+        ]
+        for msg in st.session_state.messages:
+            st.chat_message(msg["role"]).write(msg["content"])
 
-    # User input box
+    # Chat input box
     user_input = st.chat_input("Ask me about your expenses, debts, or reminders...")
 
     if user_input:
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        for msg in st.session_state.messages:
+            st.chat_message(msg["role"]).write(msg["content"])
+
         # Call backend
         try:
             res = requests.post(f"{BASE_URL}/chatbot", json={"message": user_input})
@@ -287,13 +294,5 @@ elif menu == "AI Assistant":
         except Exception as e:
             bot_reply = f"⚠️ Connection error: {e}"
 
-        # Save conversation
-        st.session_state.chat_history.append(("You", user_input))
-        st.session_state.chat_history.append(("Bot", bot_reply))
-
-    # Display chat
-    for role, text in st.session_state.chat_history:
-        if role == "You":
-            st.markdown(f"🧑 **{role}:** {text}")
-        else:
-            st.markdown(f"🤖 **{role}:** {text}")
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+        st.chat_message("assistant").write(bot_reply)

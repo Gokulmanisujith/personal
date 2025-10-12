@@ -37,28 +37,7 @@ KEYWORD_FALLBACKS: Dict[str, List[str]] = {
     "Transport": ["metro", "bus", "cab", "taxi"],
     "Utilities": ["gas", "water", "electric", "utility"],
 }
-
-def _standardize_columns(df: pd.DataFrame, date_col: str, desc_col: str, amount_col: str) -> pd.DataFrame:
-    df = df.rename(columns={
-        date_col: "Date", desc_col: "Description", amount_col: "Amount"
-    })
-    return df[["Date", "Description", "Amount"]]
-
-def load_transactions(
-    csv_path: pd.DataFrame,
-    date_col: str = "Date",
-    desc_col: str = "Description",
-    amount_col: str = "Amount"
-) -> pd.DataFrame:
-    df = csv_path
-    df = _standardize_columns(df, date_col, desc_col, amount_col)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"])
-    df["Description"] = df["Description"].astype(str).str.strip()
-    df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
-    df = df.dropna(subset=["Amount"])
-    return df.sort_values("Date").reset_index(drop=True)
-
+ 
 def extract_merchant(description: str) -> str:
   
     s = description.lower()
@@ -158,22 +137,4 @@ def plot_monthly_bar(monthly: pd.DataFrame, save_path: Path, title: str="Monthly
     plt.tight_layout()
     plt.savefig(save_path, dpi=200)
     plt.close()
-
-# ---------- Export ----------
-def export_reports(out_dir: Path,
-                   df_full: pd.DataFrame,
-                   overall: dict,
-                   by_cat: pd.DataFrame,
-                   monthly: pd.DataFrame,
-                   merchants: pd.DataFrame,
-                   anomalies: pd.DataFrame):
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # CSVs
-    df_full.to_csv(out_dir / "transactions_enriched.csv", index=False)
-    by_cat.to_csv(out_dir / "expenses_by_category.csv", index=False)
-    monthly.to_csv(out_dir / "monthly_summary.csv", index=False)
-    merchants.to_csv(out_dir / "top_merchants.csv", index=False)
-    anomalies.to_csv(out_dir / "anomalies.csv", index=False)
-    # Overall summary as JSON
-    (out_dir / "overall_summary.json").write_text(json.dumps(overall, indent=2))
+ 

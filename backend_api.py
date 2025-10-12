@@ -14,19 +14,12 @@ import requests
 import os
 import google.generativeai as genai
 from sentence_transformers import SentenceTransformer
-import faiss
 from google.api_core.exceptions import ResourceExhausted
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_community.vectorstores import FAISS
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
-from langchain.docstore.document import Document
-from fastapi import BackgroundTasks
-
+import chromadb
+from chromadb.utils import embedding_functions
 
 
 from expenditure_analyser import (
-    load_transactions,
     enrich_transactions,
     summarize_overall,
     summarize_by_category,
@@ -146,6 +139,7 @@ async def upload_pdf(file: UploadFile = File(...)):
                 })
 
     transactions_df = pd.DataFrame(rows) 
+    rebuild_chroma_collection()
     return {"status": "success", "num_transactions": len(transactions_df)}
 
 @app.post("/add_transaction")
@@ -157,11 +151,11 @@ def add_transaction(trx: TransactionIn):
     try:
         # Convert incoming data to DataFrame
         df_new = pd.DataFrame([trx.dict()])
-        print(df_new)
         # Enrich transaction (calculates Category, Type, AbsAmount, Month)
         df_enriched = enrich_transactions(df_new)
         # Append to global transactions
         transactions_df = pd.concat([transactions_df, df_enriched], ignore_index=True)
+        rebuild_chroma_collection()
         return {"status": "success", "row": df_enriched.to_dict(orient="records")[0]}
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -237,6 +231,7 @@ def add_debt(debt: Debt):
     global debts_df
     new_entry = pd.DataFrame([debt.dict()])
     debts_df = pd.concat([debts_df, new_entry], ignore_index=True)
+    rebuild_chroma_collection()
     return {"message": "Debt added successfully!"}
 
 reminders_df = pd.DataFrame(columns=["title", "date", "time","Amount", "notes"])
@@ -251,7 +246,7 @@ async def add_reminder(request: Request):
 
     # Append the new row safely
     reminders_df = pd.concat([reminders_df, new_row], ignore_index=True)
-
+    rebuild_chroma_collection()
     return {"status": "success", "reminder": data}
 
 @app.get("/reminders")
@@ -270,40 +265,66 @@ genai.configure(api_key="AIzaSyCbfDRPBQE2Uat9jkIQEJ-BZRtPu4ayuXY")
 # Load embedding model
 embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
+# -------------------- VECTOR DB (Chroma) --------------------
+chroma_client = chromadb.Client()
+collection = chroma_client.create_collection("finance")
+
 # Example finance knowledge base
-knowledge_base = [
-    "Expense: Spent 200 on groceries yesterday",
-    "Expense: Paid 100 for internet bill",
-    "Debt: I owe 5000 to HDFC Bank",
-    "Debt: Friend owes me 2000",
-    "Reminder: Pay electricity bill tomorrow",
-    "Reminder: Rent payment due on 5th"
-]
+# ...existing code...
 
-# -------------------- VECTOR DB --------------------
-embeddings = embedder.encode(knowledge_base, convert_to_numpy=True)
-dimension = embeddings.shape[1]
-index = faiss.IndexFlatL2(dimension)
-index.add(embeddings)
+def build_knowledge_base():
+    kb = []
+    # Transactions
+    for _, row in transactions_df.iterrows():
+        kb.append(f"Expense: Spent {row['Amount']} on {row['Description']} ({row['Category']}) on {row['Date']}")
+    # Debts
+    for _, row in debts_df.iterrows():
+        if row['type'] == 'owe':
+            kb.append(f"Debt: I owe {row['amount']} to {row['person']} due on {row['due_date']}")
+        else:
+            kb.append(f"Debt: {row['person']} owes me {row['amount']} due on {row['due_date']}")
+    # Reminders
+    for _, row in reminders_df.iterrows():
+        kb.append(f"Reminder: {row['title']} of {row['Amount']} on {row['date']} at {row['time']}")
+    return kb
 
+def rebuild_chroma_collection():
+    global collection
+    # Delete and recreate collection
+    chroma_client.delete_collection("finance")
+    collection = chroma_client.create_collection("finance")
+    kb = build_knowledge_base()
+    for i, text in enumerate(kb):
+        embedding = embedder.encode([text]).tolist()
+        collection.add(documents=[text], embeddings=embedding, ids=[str(i)])
+
+# Call rebuild_chroma_collection() after any data update
+# For example, after uploading PDF, adding transaction, debt, or reminder:
+# rebuild_chroma_collection()
+rebuild_chroma_collection()
+# ...existing code...
+
+
+
+ 
 
 class ChatRequest(BaseModel):
     message: str
 
 # -------------------- HELPERS --------------------
 def retrieve_context(query, top_k=2):
-    q_emb = embedder.encode([query], convert_to_numpy=True)
-    D, I = index.search(q_emb, top_k)
-    return [knowledge_base[i] for i in I[0]]
+    q_emb = embedder.encode([query]).tolist()
+    results = collection.query(query_embeddings=q_emb, n_results=top_k)
+    return results["documents"][0]  # list of retrieved docs
 
 def handle_local_query(user_msg: str):
     """Answer simple finance queries without Gemini API."""
     user_msg_lower = user_msg.lower()
-
+    kb=build_knowledge_base()
     # Total spending
     if "total spending" in user_msg_lower or "total expense" in user_msg_lower:
         total = 0
-        for item in knowledge_base:
+        for item in kb:
             if item.startswith("Expense"):
                 amount = int("".join([c for c in item if c.isdigit()]))
                 total += amount
@@ -312,7 +333,7 @@ def handle_local_query(user_msg: str):
     # Total debt
     if "total debt" in user_msg_lower or "how much do i owe" in user_msg_lower:
         total = 0
-        for item in knowledge_base:
+        for item in kb:
             if item.startswith("Debt: I owe"):
                 amount = int("".join([c for c in item if c.isdigit()]))
                 total += amount
@@ -320,7 +341,7 @@ def handle_local_query(user_msg: str):
 
     # Reminders
     if "reminder" in user_msg_lower or "due" in user_msg_lower:
-        reminders = [item for item in knowledge_base if item.startswith("Reminder")]
+        reminders = [item for item in kb if item.startswith("Reminder")]
         return "Here are your reminders:\n- " + "\n- ".join(reminders)
 
     return None  # fallback to Gemini
@@ -335,7 +356,7 @@ def chatbot(req: ChatRequest):
     if local_answer:
         return {"response": local_answer}
 
-    # Otherwise, try Gemini
+    # Otherwise, try Gemini with retrieved context
     context = retrieve_context(user_msg, top_k=2)
     prompt = f"""
     You are a finance assistant. Use the context below to answer the question.
@@ -346,12 +367,11 @@ def chatbot(req: ChatRequest):
     """
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-pro-latest")
+        model = genai.GenerativeModel("gemini-2.5-flash-lite-preview-09-2025")
         response = model.generate_content(prompt)
         return {"response": response.text}
     except ResourceExhausted:
-        # ✅ Clear message if API limit exceeded
-        return {"response": "⚠ Gemini API limit exceeded. Please wait or upgrade your plan."}
+       return {"response": "⚠ Gemini API limit exceeded. Please wait or upgrade your plan."}
     except Exception as e:
         return {"response": f"⚠ Error contacting Gemini API: {str(e)}"}
 

@@ -9,5 +9,5 @@ pdfplumber
 pydantic
 google-generativeai
 sentence-transformers
-faiss-cpu
+chromadb
 matplotlib
